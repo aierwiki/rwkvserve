@@ -1,0 +1,18 @@
+include README.md
+include README_zh.md
+include LICENSE
+include pyproject.toml
+include MANIFEST.in
+
+recursive-include rwkvserve/data/tokenizers/vocab *.txt
+recursive-include rwkvserve/models/rwkv7/operators/cuda *.cu *.cpp
+recursive-include rwkvserve/api/chat_templates *.jinja
+recursive-include rwkvserve/configs/models *.json
+
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude *.so
+global-exclude *.dylib
+global-exclude .DS_Store
+global-exclude *.egg-info
+global-exclude .git*

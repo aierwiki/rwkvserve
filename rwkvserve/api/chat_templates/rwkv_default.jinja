@@ -1,0 +1,24 @@
+{# RWKV Default Chat Template #}
+{# 
+This is the default chat template for RWKV models.
+Format: Simple role-based conversation format
+
+Example:
+User: Hello!
+Assistant: Hi! How can I help you?
+User: What is AI?
+Assistant: AI stands for Artificial Intelligence...
+#}
+{%- for message in messages -%}
+{%- if message.role == 'system' -%}
+System: {{ message.content }}
+
+{%- elif message.role == 'user' -%}
+User: {{ message.content }}
+
+{%- elif message.role == 'assistant' -%}
+Assistant: {{ message.content }}
+
+{%- endif -%}
+{% endfor -%}
+Assistant:

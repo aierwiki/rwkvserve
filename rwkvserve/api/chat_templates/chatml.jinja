@@ -1,0 +1,18 @@
+{# ChatML Template #}
+{# 
+Format: ChatML format (used by ChatGPT)
+
+Example:
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Hello!<|im_end|>
+<|im_start|>assistant
+Hi! How can I help you?<|im_end|>
+#}{%- for message in messages -%}
+<|im_start|>{{ message.role }}
+{{ message.content }}<|im_end|>
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<|im_start|>assistant
+{%- endif -%}

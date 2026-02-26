@@ -1,0 +1,31 @@
+{# Alpaca Chat Template #}
+{# 
+Format: Alpaca instruction format
+
+Example:
+Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+What is AI?
+
+### Response:
+AI stands for Artificial Intelligence...
+#}
+{%- if messages[0].role == 'system' -%}
+{{ messages[0].content }}
+
+{%- endif -%}
+{%- for message in messages -%}
+{%- if message.role == 'user' -%}
+### Instruction:
+{{ message.content }}
+
+{%- elif message.role == 'assistant' -%}
+### Response:
+{{ message.content }}
+
+{%- endif -%}
+{%- endfor -%}
+{%- if messages[-1].role != 'assistant' -%}
+### Response:
+{%- endif -%}
