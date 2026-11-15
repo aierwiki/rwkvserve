@@ -271,14 +271,22 @@ class SchedulerCore:
                 seq.cached_state = state
                 seq.cached_prefix_len = prefix_len
                 seq.prefill_offset = prefix_len
+                # Kept for the full-hit path: hidden state after the last cached
+                # token, used to sample the first generated token (D3 fix).
+                seq.cached_output = output
 
         if seq.cached_state is not None:
             self._load_state_to_slot(slot_id, seq.cached_state)
             seq.cached_state = None
 
             if seq.prefill_offset >= len(seq.prompt_tokens):
+                # Full prompt served from cache. The cached state already includes
+                # the last prompt token, and seq.cached_output holds the hidden
+                # state right after it — sample the first generated token from it
+                # in the next decode step instead of re-feeding prompt[-1] (which
+                # would process that token twice). Status change to RUNNING is
+                # picked up by _schedule(), which owns the queue bookkeeping.
                 seq.status = SeqStatus.RUNNING
-                seq.last_token_id = seq.prompt_tokens[-1]
         else:
             self._reset_slot_state(slot_id)
 
@@ -411,40 +419,66 @@ class SchedulerCore:
         if DEBUG_MEMORY:
             log_memory(f"Before decode batch (batch={len(decode_batch)})")
 
-        indices = [s.slot_id for s in decode_batch]
-        att_x, att_kv, ffn_x = self._gather_states(indices)
+        # Sequences whose full prompt came from the state cache still owe their
+        # first generated token; sample it from the cached hidden state without a
+        # forward pass (the cache state already includes the last prompt token).
+        cache_pending = [s for s in decode_batch if s.cached_output is not None]
+        forward_seqs = [s for s in decode_batch if s.cached_output is None]
 
-        input_tensor = torch.tensor(
-            [[s.last_token_id] for s in decode_batch],
-            dtype=torch.long, device=self.device
-        )
-
-        final_x, new_states = self._model_forward_with_state(
-            input_tensor, att_x, att_kv, ffn_x
-        )
-        self._scatter_states(indices, new_states)
-
-        if DEBUG_MEMORY:
-            log_memory(f"After decode forward (batch={len(decode_batch)})")
-
-        logits = self.model.head(final_x[:, -1, :]).to(torch.float32)
         new_tokens = []
 
-        for i, seq in enumerate(decode_batch):
-            token_id, _ = self.sampler.sample(
-                logits[i],
-                temperature=seq.temperature,
-                top_p=seq.top_p,
-                top_k=seq.top_k,
-                logit_bias=seq.logit_bias
+        if cache_pending:
+            for seq in cache_pending:
+                hidden = seq.cached_output.to(self.device)
+                seq.cached_output = None
+                logits = self.model.head(hidden).to(torch.float32)
+                token_id, _ = self.sampler.sample(
+                    logits,
+                    temperature=seq.temperature,
+                    top_p=seq.top_p,
+                    top_k=seq.top_k,
+                    logit_bias=seq.logit_bias
+                )
+                seq.last_token_id = token_id
+                seq.generated_tokens.append(token_id)
+                new_tokens.append((seq.seq_id, token_id))
+                if seq.is_finished:
+                    self._finish_sequence(seq)
+
+        if forward_seqs:
+            indices = [s.slot_id for s in forward_seqs]
+            att_x, att_kv, ffn_x = self._gather_states(indices)
+
+            input_tensor = torch.tensor(
+                [[s.last_token_id] for s in forward_seqs],
+                dtype=torch.long, device=self.device
             )
 
-            seq.last_token_id = token_id
-            seq.generated_tokens.append(token_id)
-            new_tokens.append((seq.seq_id, token_id))
+            final_x, new_states = self._model_forward_with_state(
+                input_tensor, att_x, att_kv, ffn_x
+            )
+            self._scatter_states(indices, new_states)
 
-            if seq.is_finished:
-                self._finish_sequence(seq)
+            if DEBUG_MEMORY:
+                log_memory(f"After decode forward (batch={len(forward_seqs)})")
+
+            logits = self.model.head(final_x[:, -1, :]).to(torch.float32)
+
+            for i, seq in enumerate(forward_seqs):
+                token_id, _ = self.sampler.sample(
+                    logits[i],
+                    temperature=seq.temperature,
+                    top_p=seq.top_p,
+                    top_k=seq.top_k,
+                    logit_bias=seq.logit_bias
+                )
+
+                seq.last_token_id = token_id
+                seq.generated_tokens.append(token_id)
+                new_tokens.append((seq.seq_id, token_id))
+
+                if seq.is_finished:
+                    self._finish_sequence(seq)
 
         return new_tokens
 

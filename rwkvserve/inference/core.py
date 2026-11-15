@@ -62,9 +62,11 @@ class TokenSampler:
         if logits.dim() != 1:
             raise ValueError(f"Single sampling requires 1D logits, got shape {logits.shape}")
         
-        # Ban out-of-vocabulary tokens
+        # Ban out-of-vocabulary tokens. Work on a private copy so the caller's
+        # tensor (possibly a view into a larger batch buffer) is never mutated.
         max_valid_token_id = getattr(TokenSampler, '_max_valid_token_id', None)
         if max_valid_token_id is not None and max_valid_token_id + 1 < len(logits):
+            logits = logits.clone()
             logits[max_valid_token_id + 1:] = float('-inf')
         
         # Greedy sampling: return argmax when temperature=0
@@ -77,8 +79,10 @@ class TokenSampler:
         if temperature != 1.0:
             logits = logits / temperature
         
-        # Apply logit_bias (OpenAI compatible)
+        # Apply logit_bias (OpenAI compatible). logits may still be the caller's
+        # tensor when no vocab ban cloned it — clone defensively before mutating.
         if logit_bias is not None and len(logit_bias) > 0:
+            logits = logits.clone()
             for token_id_str, bias in logit_bias.items():
                 token_id = int(token_id_str)
                 if 0 <= token_id < len(logits):
@@ -175,8 +179,10 @@ class TokenSampler:
         if temperature != 1.0:
             logits_batch = logits_batch / temperature
         
-        # Apply logit_bias (OpenAI compatible)
+        # Apply logit_bias (OpenAI compatible). logits may still be the caller's
+        # tensor when no vocab ban cloned it — clone defensively before mutating.
         if logit_bias is not None and len(logit_bias) > 0:
+            logits = logits.clone()
             for token_id_str, bias in logit_bias.items():
                 token_id = int(token_id_str)
                 if 0 <= token_id < logits_batch.shape[1]:

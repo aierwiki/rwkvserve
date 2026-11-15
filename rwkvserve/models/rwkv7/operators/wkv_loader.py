@@ -18,9 +18,9 @@ from pathlib import Path
 
 
 # Global cache
-_cpu_operator = None
-_cuda_operator_train = None
-_cuda_operator_inference = None
+_cpu_operators = {}
+_cuda_operator_train = {}
+_cuda_operator_inference = {}
 _cuda_operator_infctx = None
 _load_lock = threading.Lock()
 
@@ -139,10 +139,10 @@ def load_cpu_operator(head_size: int = 64) -> Callable:
     Returns:
         CPU operator function.
     """
-    global _cpu_operator
+    global _cpu_operators
 
-    if _cpu_operator is not None:
-        return _cpu_operator
+    if head_size in _cpu_operators:
+        return _cpu_operators[head_size]
 
     from .wkv_cpu import RUN_CPU_RWKV7
 
@@ -156,9 +156,9 @@ def load_cpu_operator(head_size: int = 64) -> Callable:
         else:
             return output
 
-    _cpu_operator = _cpu_operator_wrapper
+    _cpu_operators[head_size] = _cpu_operator_wrapper
 
-    return _cpu_operator
+    return _cpu_operator_wrapper
 
 
 # ============================================================================
@@ -184,12 +184,12 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
     """
     global _cuda_operator_train
 
-    if _cuda_operator_train is not None:
-        return _cuda_operator_train
+    if head_size in _cuda_operator_train:
+        return _cuda_operator_train[head_size]
 
     with _load_lock:
-        if _cuda_operator_train is not None:
-            return _cuda_operator_train
+        if head_size in _cuda_operator_train:
+            return _cuda_operator_train[head_size]
 
         import torch
         from torch.utils.cpp_extension import load
@@ -199,7 +199,7 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
         world_size = _get_world_size()
 
         local_cuda_dir = os.path.join(os.path.dirname(__file__), 'cuda')
-        module_name = "wind_backstepping"
+        module_name = f"wind_backstepping_h{head_size}"
 
         cache_exists = _check_cache_exists(module_name)
 
@@ -297,12 +297,12 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
             y_tensor = cast(torch.Tensor, y_chunk)
             return torch.reshape(y_tensor, (B, T, HC))
 
-        _cuda_operator_train = RUN_CUDA_RWKV7g
+        _cuda_operator_train[head_size] = RUN_CUDA_RWKV7g
 
         if rank == 0:
             print("RWKV7 CUDA training operator ready")
 
-        return _cuda_operator_train
+        return _cuda_operator_train[head_size]
 
 
 def load_cuda_operator_inference(head_size: int = 64) -> Callable:
@@ -324,12 +324,12 @@ def load_cuda_operator_inference(head_size: int = 64) -> Callable:
     """
     global _cuda_operator_inference
 
-    if _cuda_operator_inference is not None:
-        return _cuda_operator_inference
+    if head_size in _cuda_operator_inference:
+        return _cuda_operator_inference[head_size]
 
     with _load_lock:
-        if _cuda_operator_inference is not None:
-            return _cuda_operator_inference
+        if head_size in _cuda_operator_inference:
+            return _cuda_operator_inference[head_size]
 
         import torch
         from torch.utils.cpp_extension import load
@@ -338,7 +338,7 @@ def load_cuda_operator_inference(head_size: int = 64) -> Callable:
         world_size = _get_world_size()
 
         local_cuda_dir = os.path.join(os.path.dirname(__file__), 'cuda')
-        module_name = "wkv7s_custom"
+        module_name = f"wkv7s_custom_h{head_size}"
 
         cache_exists = _check_cache_exists(module_name)
 
@@ -396,8 +396,8 @@ def load_cuda_operator_inference(head_size: int = 64) -> Callable:
         except Exception as e:
             print(f"Warning: CUDA operator compilation failed: {e}")
             print("  Falling back to pure PyTorch implementation (slower)")
-            _cuda_operator_inference = load_cpu_operator(head_size)
-            return _cuda_operator_inference
+            _cuda_operator_inference[head_size] = load_cpu_operator(head_size)
+            return _cuda_operator_inference[head_size]
 
         class WKV7S(torch.autograd.Function):
             @staticmethod
@@ -428,17 +428,23 @@ def load_cuda_operator_inference(head_size: int = 64) -> Callable:
         def RUN_CUDA_RWKV7S(r, w, k, v, a, b, state=None, return_state=False):
             if state is None:
                 raise ValueError("wkv7s requires a state argument")
-            y = WKV7S.apply(state, r, w, k, v, a, b)
+            # The wkv7s kernel writes the updated state back into the passed
+            # buffer in-place. Clone here so caller-owned tensors (state caches,
+            # other requests' slots) are never corrupted; CPU path is
+            # out-of-place, so this also unifies CPU/CUDA mutation semantics.
+            # Return the updated clone.
+            state_work = state.clone()
+            y = WKV7S.apply(state_work, r, w, k, v, a, b)
             if return_state:
-                return y, state
+                return y, state_work
             return y
 
-        _cuda_operator_inference = RUN_CUDA_RWKV7S
+        _cuda_operator_inference[head_size] = RUN_CUDA_RWKV7S
 
         if rank == 0:
             print("RWKV7s CUDA inference operator ready (with state support)")
 
-        return _cuda_operator_inference
+        return _cuda_operator_inference[head_size]
 
 
 # ============================================================================
