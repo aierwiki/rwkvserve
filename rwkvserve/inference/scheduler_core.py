@@ -69,6 +69,8 @@ class SequenceState:
 
     output_queue: Optional[Any] = None
 
+    stop_checker: Optional[Any] = None  # IncrementalStopChecker (lazy)
+
     enforcer: Optional[Any] = None
     enforcer_finished: bool = False
 
@@ -193,7 +195,30 @@ class SchedulerCore:
 
     def add_sequence(self, seq: SequenceState) -> None:
         """Add a single sequence to the waiting queue."""
+        self._init_stop_checker(seq)
         self.waiting_queue.append(seq)
+
+    def _init_stop_checker(self, seq: SequenceState) -> None:
+        """Create the incremental stop checker when the tokenizer exposes bytes."""
+        if seq.stop and seq.stop_checker is None:
+            tok = self.tokenizer
+            if hasattr(tok, "idx2token") and tok.idx2token:
+                from rwkvserve.inference.stop_checker import IncrementalStopChecker
+                seq.stop_checker = IncrementalStopChecker(tok.idx2token, seq.stop)
+
+    def _post_sample(self, seq: SequenceState, token_id: int) -> bool:
+        """Feed the sampled token into the stop checker.
+
+        Returns True when a stop string fired: generated_tokens/text are already
+        truncated and the sequence must be finished.
+        """
+        if seq.stop_checker is None:
+            return False
+        hit, keep = seq.stop_checker.feed(token_id)
+        if hit and keep is not None:
+            seq.generated_tokens = seq.generated_tokens[:keep]
+            seq.generated_text = seq.stop_checker.keep_text
+        return hit
 
     def has_pending_work(self) -> bool:
         """Check whether there is pending work."""
@@ -441,6 +466,10 @@ class SchedulerCore:
                 )
                 seq.last_token_id = token_id
                 seq.generated_tokens.append(token_id)
+                if self._post_sample(seq, token_id):
+                    new_tokens.append((seq.seq_id, token_id))
+                    self._finish_sequence(seq)
+                    continue
                 new_tokens.append((seq.seq_id, token_id))
                 if seq.is_finished:
                     self._finish_sequence(seq)
@@ -475,6 +504,10 @@ class SchedulerCore:
 
                 seq.last_token_id = token_id
                 seq.generated_tokens.append(token_id)
+                if self._post_sample(seq, token_id):
+                    new_tokens.append((seq.seq_id, token_id))
+                    self._finish_sequence(seq)
+                    continue
                 new_tokens.append((seq.seq_id, token_id))
 
                 if seq.is_finished:
@@ -552,6 +585,10 @@ class SchedulerCore:
 
                     seq.last_token_id = token_id
                     seq.generated_tokens.append(token_id)
+                    if self._post_sample(seq, token_id):
+                        new_tokens.append((seq.seq_id, token_id))
+                        self._finish_sequence(seq)
+                        continue
                     new_tokens.append((seq.seq_id, token_id))
 
                     if seq.is_finished:

@@ -197,17 +197,15 @@ class RWKVEngine:
             
             token_text = self.tokenizer.decode([token_id])
             seq.generated_text += token_text
-            
-            stop_detected = False
-            if seq.stop:
-                for stop_str in seq.stop:
-                    if stop_str in seq.generated_text:
-                        stop_detected = True
-                        break
-            
+
+            # Incremental stop check (byte-safe; truncates text to OpenAI spec)
+            stop_detected = self.scheduler_core._post_sample(seq, token_id)
+            if stop_detected and seq.stop_checker is not None:
+                seq.generated_text = seq.stop_checker.keep_text
+
             if seq.output_queue is not None:
                 await seq.output_queue.put(token_id)
-            
+
             if seq.is_finished or stop_detected:
                 self.scheduler_core._finish_sequence(seq)
                 if seq.output_queue is not None:
@@ -270,17 +268,14 @@ class RWKVEngine:
                     
                     token_text = self.tokenizer.decode([token_id])
                     seq.generated_text += token_text
-                    
-                    stop_detected = False
-                    if seq.stop:
-                        for stop_str in seq.stop:
-                            if stop_str in seq.generated_text:
-                                stop_detected = True
-                                break
-                    
+
+                    stop_detected = self.scheduler_core._post_sample(seq, token_id)
+                    if stop_detected and seq.stop_checker is not None:
+                        seq.generated_text = seq.stop_checker.keep_text
+
                     if seq.output_queue is not None:
                         await seq.output_queue.put(token_id)
-                    
+
                     if seq.is_finished or stop_detected:
                         self.scheduler_core._finish_sequence(seq)
                         if seq.output_queue is not None:
